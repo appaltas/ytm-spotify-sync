@@ -328,11 +328,15 @@ def search_spotify_track(sp: spotipy.Spotify, track: TrackInfo) -> Optional[dict
     return None
 
 
-def fetch_ytmusic_liked_songs(ytmusic: YTMusic, limit: int = 50) -> list[TrackInfo]:
+def fetch_ytmusic_liked_songs(ytmusic: YTMusic, limit: Optional[int] = None) -> list[TrackInfo]:
     """
-    Retrieves the most recent liked songs from YouTube Music and extracts normalized metadata.
+    Retrieves liked songs from YouTube Music (all by default, or up to limit) and extracts normalized metadata.
     """
-    logger.info(f"Fetching up to {limit} liked songs from YouTube Music...")
+    if limit:
+        logger.info(f"Fetching up to {limit} liked songs from YouTube Music...")
+    else:
+        logger.info("Fetching all liked songs from YouTube Music library...")
+
     try:
         liked_response = ytmusic.get_liked_songs(limit=limit)
         tracks_raw = liked_response.get("tracks", []) if isinstance(liked_response, dict) else []
@@ -386,8 +390,8 @@ def run_sync() -> None:
     # 3. Retrieve current playlist track IDs from Spotify
     existing_spotify_ids = get_spotify_playlist_track_ids(sp, playlist_id)
 
-    # 4. Fetch latest Liked Songs from YouTube Music
-    liked_tracks = fetch_ytmusic_liked_songs(ytmusic, limit=50)
+    # 4. Fetch all Liked Songs from YouTube Music
+    liked_tracks = fetch_ytmusic_liked_songs(ytmusic, limit=None)
 
     stats = SyncStats(total_processed=len(liked_tracks))
     newly_added_yt_ids: list[str] = []
