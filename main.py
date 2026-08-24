@@ -144,12 +144,36 @@ def save_state(state: dict[str, Any]) -> None:
             temp_file.unlink()
 
 
+def sanitize_secret_value(val: Optional[str]) -> str:
+    """Cleans up raw environment variables from accidental quotes, whitespace, or KEY= prefix."""
+    if not val:
+        return ""
+    cleaned = val.strip()
+    # If pasted as KEY=VALUE, extract VALUE
+    if "=" in cleaned and any(cleaned.startswith(k) for k in ["SPOTIPY_", "SPOTIFY_", "YTM_"]):
+        cleaned = cleaned.split("=", 1)[1].strip()
+    # Strip wrapping quotes if present
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def extract_playlist_id(raw_id: str) -> str:
+    """Extracts clean Spotify playlist ID from URL or raw ID string."""
+    clean = sanitize_secret_value(raw_id)
+    if "/playlist/" in clean:
+        clean = clean.split("/playlist/")[1].split("?")[0].split("/")[0].strip()
+    elif "?" in clean:
+        clean = clean.split("?")[0].strip()
+    return clean
+
+
 def get_ytmusic_client() -> YTMusic:
     """
     Initializes and authenticates the YouTube Music client using YTM_HEADERS_JSON.
     Supports either a JSON string of headers or a path to a JSON configuration file.
     """
-    raw_headers = os.getenv("YTM_HEADERS_JSON")
+    raw_headers = sanitize_secret_value(os.getenv("YTM_HEADERS_JSON"))
     if not raw_headers:
         raise ValueError("Environment variable 'YTM_HEADERS_JSON' is not set or empty.")
 
@@ -161,8 +185,10 @@ def get_ytmusic_client() -> YTMusic:
     # If it's a JSON string, write to a secure temporary file for ytmusicapi compatibility
     try:
         parsed_json = json.loads(raw_headers)
-    except json.JSONDecodeError as err:
-        raise ValueError("Invalid JSON in 'YTM_HEADERS_JSON' environment variable.") from err
+    except json.JSONDecodeError:
+        # Fallback: if not valid JSON, treat as raw header string directly
+        logger.info("Initializing YTMusic client with raw headers string.")
+        return YTMusic(auth=raw_headers)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as temp_auth_file:
         json.dump(parsed_json, temp_auth_file)
@@ -181,9 +207,9 @@ def get_spotify_client() -> spotipy.Spotify:
     """
     Initializes and authenticates the Spotify client using OAuth Refresh Token flow.
     """
-    client_id = os.getenv("SPOTIPY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
-    refresh_token = os.getenv("SPOTIPY_REFRESH_TOKEN")
+    client_id = sanitize_secret_value(os.getenv("SPOTIPY_CLIENT_ID"))
+    client_secret = sanitize_secret_value(os.getenv("SPOTIPY_CLIENT_SECRET"))
+    refresh_token = sanitize_secret_value(os.getenv("SPOTIPY_REFRESH_TOKEN"))
 
     missing = []
     if not client_id:
@@ -219,12 +245,13 @@ def get_spotify_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> Set
     Fetches all existing track IDs and URIs currently in the target Spotify playlist
     to ensure idempotency and prevent duplicate additions.
     """
+    clean_playlist_id = extract_playlist_id(playlist_id)
     existing_ids: Set[str] = set()
-    logger.info(f"Fetching current tracks from Spotify playlist '{playlist_id}'...")
+    logger.info(f"Fetching current tracks from Spotify playlist '{clean_playlist_id}'...")
 
     try:
         results = sp.playlist_items(
-            playlist_id,
+            clean_playlist_id,
             fields="items.track.id,items.track.uri,next",
             limit=100,
             additional_types=["track"],
@@ -340,9 +367,10 @@ def run_sync() -> None:
     logger.info("Starting YouTube Music -> Spotify Playlist Sync Pipeline")
     logger.info("=" * 60)
 
-    playlist_id = os.getenv("SPOTIFY_PLAYLIST_ID")
-    if not playlist_id:
+    raw_playlist = os.getenv("SPOTIFY_PLAYLIST_ID")
+    if not raw_playlist:
         raise ValueError("Environment variable 'SPOTIFY_PLAYLIST_ID' is not configured.")
+    playlist_id = extract_playlist_id(raw_playlist)
 
     # 1. Load synchronization state
     state = load_state()
