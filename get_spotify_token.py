@@ -16,6 +16,9 @@ try:
 except ImportError:
     pass
 
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = "http://127.0.0.1:9090"
