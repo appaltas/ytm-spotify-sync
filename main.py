@@ -31,6 +31,12 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from ytmusicapi import YTMusic
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Configure logging format
 logging.basicConfig(
     level=logging.INFO,
@@ -444,10 +450,10 @@ def run_sync() -> None:
     logger.info("SYNCHRONIZATION COMPLETED - SUMMARY REPORT")
     logger.info("=" * 60)
     logger.info(f"  Total YouTube Liked Songs Checked: {stats.total_processed}")
-    logger.info(f"  ✨ Newly Added to Spotify:          {stats.added_to_playlist}")
-    logger.info(f"  🔁 Already in Spotify Playlist:     {stats.already_in_playlist}")
-    logger.info(f"  ⏭️  Skipped (Previously Synced):   {stats.skipped_synced_state}")
-    logger.info(f"  ⚠️  Not Found on Spotify:            {stats.not_found}")
+    logger.info(f"  [+] Newly Added to Spotify:        {stats.added_to_playlist}")
+    logger.info(f"  [=] Already in Spotify Playlist:   {stats.already_in_playlist}")
+    logger.info(f"  [-] Skipped (Previously Synced):   {stats.skipped_synced_state}")
+    logger.info(f"  [!] Not Found on Spotify:          {stats.not_found}")
     logger.info("=" * 60)
 
 
