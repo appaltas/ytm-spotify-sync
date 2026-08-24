@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Environment Variables & Secrets
+.env
+.cache
+
+# Temp files
+*.tmp
+
+# IDEs
+.vscode/
+.idea/
