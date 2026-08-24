@@ -177,36 +177,29 @@ def extract_playlist_id(raw_id: str) -> str:
 def get_ytmusic_client() -> YTMusic:
     """
     Initializes and authenticates the YouTube Music client using YTM_HEADERS_JSON.
-    Supports either a JSON string of headers or a path to a JSON configuration file.
+    Supports JSON string, raw headers, or a filepath.
     """
     raw_headers = sanitize_secret_value(os.getenv("YTM_HEADERS_JSON"))
     if not raw_headers:
-        raise ValueError("Environment variable 'YTM_HEADERS_JSON' is not set or empty.")
+        logger.error("[CONFIG ERROR] 'YTM_HEADERS_JSON' secret is missing or empty!")
+        raise ValueError("Environment variable 'YTM_HEADERS_JSON' is not set.")
 
     # Check if raw_headers is a valid file path
     if os.path.isfile(raw_headers):
-        logger.info("Initializing YTMusic using headers file path.")
+        logger.info(f"Initializing YTMusic using headers file path '{raw_headers}'.")
         return YTMusic(auth=raw_headers)
 
-    # If it's a JSON string, write to a secure temporary file for ytmusicapi compatibility
+    # Try parsing JSON
     try:
-        parsed_json = json.loads(raw_headers)
-    except json.JSONDecodeError:
-        # Fallback: if not valid JSON, treat as raw header string directly
-        logger.info("Initializing YTMusic client with raw headers string.")
-        return YTMusic(auth=raw_headers)
+        parsed = json.loads(raw_headers)
+        if isinstance(parsed, dict):
+            logger.info("Initializing YTMusic using parsed JSON headers.")
+            return YTMusic(auth=json.dumps(parsed))
+    except Exception:
+        pass
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as temp_auth_file:
-        json.dump(parsed_json, temp_auth_file)
-        temp_auth_path = temp_auth_file.name
-
-    try:
-        logger.info("Initializing YTMusic client with provided JSON headers.")
-        ytmusic = YTMusic(auth=temp_auth_path)
-        return ytmusic
-    finally:
-        if os.path.exists(temp_auth_path):
-            os.remove(temp_auth_path)
+    logger.info("Initializing YTMusic using raw headers string.")
+    return YTMusic(auth=raw_headers)
 
 
 def get_spotify_client() -> spotipy.Spotify:
@@ -226,7 +219,9 @@ def get_spotify_client() -> spotipy.Spotify:
         missing.append("SPOTIPY_REFRESH_TOKEN")
 
     if missing:
-        raise ValueError(f"Missing required Spotify environment variables: {', '.join(missing)}")
+        err_msg = f"[CONFIG ERROR] Missing required Spotify secret(s): {', '.join(missing)}"
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
     auth_manager = SpotifyOAuth(
         client_id=client_id,
@@ -243,6 +238,7 @@ def get_spotify_client() -> spotipy.Spotify:
         sp = spotipy.Spotify(auth=token_info["access_token"])
         return sp
     except Exception as e:
+        logger.error(f"[SPOTIFY AUTH ERROR] Failed to authenticate with Spotify: {e}")
         raise RuntimeError(f"Spotify authentication failed: {e}") from e
 
 
