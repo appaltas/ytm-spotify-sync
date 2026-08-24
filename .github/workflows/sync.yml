@@ -45,19 +45,7 @@ jobs:
           python main.py
 
       - name: Commit and Push State Updates
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Stage state file only
-          git add synced_tracks.json
-          
-          # Check if changes exist in synced_tracks.json
-          if git diff --staged --quiet; then
-            echo "No state changes detected. Nothing to commit."
-          else
-            echo "Changes detected in synced_tracks.json. Committing and pushing..."
-            git commit -m "chore(sync): update synced_tracks.json state [skip ci]"
-            git pull --rebase origin ${{ github.ref_name }}
-            git push origin ${{ github.ref_name }}
-          fi
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(sync): update synced_tracks.json state [skip ci]"
+          file_pattern: 'synced_tracks.json'
