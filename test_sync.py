@@ -372,6 +372,21 @@ def test_pipeline_batches_adds_and_persists_state(tmp_path: Path | None = None):
     assert saved["synced_yt_ids"] == ["yt1", "yt2"]  # the unmatched track stays out of the state
 
 
+def test_merge_state_unions_ids_and_keeps_newest_unmatched():
+    import merge_state
+
+    ours = {"last_sync": "2026-09-19T14:00:00+00:00", "synced_yt_ids": ["a", "c"], "unmatched": ["X - New"]}
+    theirs = {"last_sync": "2026-09-19T13:00:00+00:00", "synced_yt_ids": ["a", "b"], "unmatched": ["Y - Old"]}
+    merged = merge_state.merge_states(ours, theirs)
+    assert merged["synced_yt_ids"] == ["a", "b", "c"]  # nothing lost from either run
+    assert merged["unmatched"] == ["X - New"]  # newest run's view wins
+    assert merged["last_sync"] == "2026-09-19T14:00:00+00:00"
+    # Symmetric: the newer side may be "theirs".
+    assert merge_state.merge_states(theirs, ours)["unmatched"] == ["X - New"]
+    # Garbage / missing files count as empty.
+    assert merge_state.merge_states({}, ours)["synced_yt_ids"] == ["a", "c"]
+
+
 def _run_all() -> int:
     failures = 0
     for name, func in sorted(globals().items()):

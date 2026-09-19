@@ -30,10 +30,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -76,17 +76,47 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "Sync finished with exit code $code."
 
+      # Another run (or a manual edit) may have pushed to main meanwhile. Instead
+      # of failing on a non-fast-forward push, rebuild on top of the latest main
+      # and merge both state files, retrying a few times.
       - name: Commit and Push State Updates
         if: always()
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore(sync): update synced_tracks.json state [skip ci]"
-          file_pattern: 'synced_tracks.json'
+        env:
+          STATE_FILE: synced_tracks.json
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$STATE_FILE"; then
+            echo "State unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp "$STATE_FILE" "$RUNNER_TEMP/state.new.json"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            python merge_state.py "$RUNNER_TEMP/state.new.json" "$STATE_FILE" -o "$STATE_FILE"
+            if git diff --quiet -- "$STATE_FILE"; then
+              echo "Remote state already contains this run's changes."
+              exit 0
+            fi
+            git add "$STATE_FILE"
+            git commit --quiet -m "chore(sync): update synced_tracks.json state [skip ci]"
+            if git push --quiet origin HEAD:main; then
+              echo "State pushed (attempt $attempt)."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt); retrying on top of the latest remote state..."
+            sleep $((attempt * 3))
+          done
+          echo "::error::Could not push $STATE_FILE after 5 attempts."
+          exit 1
 
       # Exit codes: 2 = YouTube Music auth, 3 = Spotify auth, 4 = missing config.
       - name: Open Credentials Issue
         if: contains(fromJSON('["2","3","4"]'), steps.sync.outputs.exit_code)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           EXIT_CODE: ${{ steps.sync.outputs.exit_code }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -152,7 +182,7 @@ jobs:
 
       - name: Close Credentials Issue After Recovery
         if: steps.sync.outputs.exit_code == '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
