@@ -1,20 +1,26 @@
 # 🎵 YouTube Music to Spotify Sync (Serverless & Free)
 
-Automatización completa y optimizada para sincronizar tus canciones con **"Me gusta"** de **YouTube Music** a una playlist específica de **Spotify** de forma periódica (cada 3 horas) y bajo demanda, ejecutándose a **coste cero** mediante **GitHub Actions**.
+Automatización completa para sincronizar tus canciones con **"Me gusta"** de **YouTube Music** a una playlist de **Spotify**, de forma periódica (cada 3 horas) y bajo demanda, ejecutándose a **coste cero** mediante **GitHub Actions**.
+
+> **⚠️ ¿Vienes de un fallo con `twoColumnBrowseResultsRenderer`?**
+> Es la sesión de YouTube Music caducada. Salta directo a [La sesión de YouTube Music ha caducado](#-la-sesión-de-youtube-music-ha-caducado).
 
 ---
 
 ## 🚀 Características Principales
 
-- 🔄 **Sincronización Periódica**: Automatizada cada 3 horas vía cron en GitHub Actions.
-- ⚡ **Activación Manual**: Posibilidad de disparar la sincronización en cualquier momento desde la pestaña *Actions* de GitHub (`workflow_dispatch`).
-- 🎯 **Búsqueda Jerárquica e Inteligente**:
-  1. Coincidencia exacta por código **ISRC** (cuando esté disponible).
-  2. Búsqueda por `track:"TÍTULO"` y `artist:"ARTISTA"`.
-  3. Búsqueda con limpieza y saneamiento de títulos de YouTube (eliminando `(Official Video)`, `[Lyrics]`, etc.).
-- 🛡️ **Control de Estado e Idempotencia**: Archivo `synced_tracks.json` persistido automáticamente en el repositorio para no reconsultar temas ya procesados ni duplicar canciones en Spotify.
-- 🔒 **Seguridad Total**: Las credenciales sensibles se gestionan de forma segura mediante **GitHub Secrets**.
-- 💸 **Coste Cero**: Utiliza exclusivamente la capa gratuita de GitHub Actions y las APIs públicas de Spotify y YouTube Music.
+- 🔐 **Autenticación OAuth para YouTube Music**: un *refresh token* propio que **no caduca solo**, en lugar de cookies del navegador que Google invalida cada pocas semanas (más aún cuando se usan desde un runner de GitHub).
+- 🔔 **Aviso automático cuando algo caduca**: si una credencial deja de funcionar, el workflow **abre un issue en el repositorio** (y te llega por email). Cuando la sincronización vuelve a funcionar, el issue **se cierra solo**.
+- 🔄 **Sincronización periódica** cada 3 horas vía cron, y **manual** desde la pestaña *Actions* (con opciones de *solo verificar credenciales* y *simulacro*).
+- 🎯 **Búsqueda jerárquica e inteligente**:
+  1. Coincidencia exacta por código **ISRC**.
+  2. Búsqueda estricta por `track:"TÍTULO"` + `artist:"ARTISTA"`.
+  3. Búsqueda relajada con limpieza de títulos (`(Official Video)`, `[Lyrics]`, …).
+- 🛡️ **Validación de coincidencias**: descarta resultados cuya duración se desvía más de 30 s o cuyo título/artista no se parecen, para no meter en tu playlist un *cover*, un directo o un mix de una hora.
+- ⚡ **Altas por lotes**: las canciones se añaden de 100 en 100 (antes: una petición por canción).
+- 💾 **Estado a prueba de cortes**: `synced_tracks.json` se guarda incluso si la ejecución falla a mitad, así que nunca se repite trabajo ya hecho.
+- ✅ **Tests offline** (`test_sync.py`) que se ejecutan en cada run antes de tocar ninguna API.
+- 🔒 **Seguridad**: credenciales solo en **GitHub Secrets**; ningún token se escribe en disco durante la ejecución.
 
 ---
 
@@ -24,168 +30,190 @@ Automatización completa y optimizada para sincronizar tus canciones con **"Me g
 .
 ├── .github/
 │   └── workflows/
-│       └── sync.yml          # Flujo de GitHub Actions (Cron cada 3h + Push de estado)
-├── .env.example              # Plantilla de variables de entorno para desarrollo local
-├── .gitignore                # Ignora .env, caches y archivos temporales
-├── get_spotify_token.py      # Script auxiliar para obtener el SPOTIPY_REFRESH_TOKEN
-├── main.py                   # Script principal de sincronización y lógica de negocio
-├── README.md                 # Documentación y guía paso a paso
+│       └── sync.yml          # Cron cada 3h + commit de estado + aviso por issue
+├── .env.example              # Plantilla de variables de entorno
+├── config.py                 # Lectura y saneado de variables/secretos
+├── ytm_auth.py               # Autenticación de YouTube Music (OAuth + detección de caducidad)
+├── main.py                   # Pipeline de sincronización
+├── setup_ytm_oauth.py        # Genera el refresh token de YouTube Music (ejecutar una vez)
+├── get_spotify_token.py      # Genera el refresh token de Spotify (ejecutar una vez)
+├── test_sync.py              # Tests offline (sin red ni credenciales)
 ├── requirements.txt          # Dependencias Python
-└── synced_tracks.json        # Registro de IDs procesados (auto-persistido por git)
+└── synced_tracks.json        # Estado: IDs ya procesados + temas sin coincidencia
 ```
 
 ---
 
-## 🔑 Guía Paso a Paso para Configurar Credenciales
+## 🔑 Configuración de Credenciales
 
-Para que el script funcione, necesitas configurar 5 variables (en local en un archivo `.env` o en **GitHub Repository Secrets**):
-
-| Variable | Descripción |
+| Secreto | Descripción |
 | :--- | :--- |
-| `YTM_HEADERS_JSON` | Cabeceras de sesión de YouTube Music en formato JSON |
-| `SPOTIPY_CLIENT_ID` | Client ID de tu aplicación en Spotify Developer Dashboard |
-| `SPOTIPY_CLIENT_SECRET` | Client Secret de tu aplicación en Spotify Developer Dashboard |
-| `SPOTIPY_REFRESH_TOKEN` | Refresh Token de OAuth de Spotify con permisos de playlist |
-| `SPOTIFY_PLAYLIST_ID` | ID de la playlist destino en Spotify |
+| `YTM_OAUTH_CLIENT_ID` | Client ID de tu cliente OAuth de Google |
+| `YTM_OAUTH_CLIENT_SECRET` | Client Secret de ese mismo cliente |
+| `YTM_OAUTH_REFRESH_TOKEN` | Refresh token de YouTube Music (no caduca solo) |
+| `SPOTIPY_CLIENT_ID` | Client ID de tu app en Spotify Developer Dashboard |
+| `SPOTIPY_CLIENT_SECRET` | Client Secret de esa app |
+| `SPOTIPY_REFRESH_TOKEN` | Refresh token de OAuth de Spotify |
+| `SPOTIFY_PLAYLIST_ID` | ID de la playlist destino |
+
+> El antiguo `YTM_HEADERS_JSON` (cookies) **sigue funcionando como fallback**, pero está en desuso: es exactamente lo que provoca el fallo que estás viendo. Cuando configures OAuth puedes borrar ese secreto.
 
 ---
 
-### Paso 1: Obtener `YTM_HEADERS_JSON` (YouTube Music)
+### Paso 1: Crear el cliente OAuth de Google (para YouTube Music)
 
-1. Abre tu navegador (Chrome/Firefox/Edge) y entra en [music.youtube.com](https://music.youtube.com) habiendo iniciado sesión con tu cuenta de Google.
-2. Abre las **Herramientas de Desarrollador** (`F12` o `Ctrl + Shift + I`) y dirígete a la pestaña **Network** (Red).
-3. Filtra por `browse` o interactúa con la página (por ejemplo, haz clic en *Biblioteca* o *Explorar*).
-4. Selecciona una petición enviada a `music.youtube.com` (por ejemplo, `browse` o `next`).
-5. En la sección **Request Headers** (Cabeceras de la petición):
-   - Haz clic derecho sobre las cabeceras y selecciona **Copy as cURL (bash)** o copia las cabeceras principales (`cookie`, `x-goog-authuser`, `authorization`, `user-agent`).
-6. Si utilizas la librería `ytmusicapi`, puedes generar el JSON automáticamente ejecutando en tu terminal:
+Solo se hace una vez y es gratis.
+
+1. Entra en [Google Cloud Console](https://console.cloud.google.com/) y crea un proyecto (por ejemplo `ytm-sync`).
+2. **APIs y servicios → Biblioteca** → busca **YouTube Data API v3** → **Habilitar**.
+3. **APIs y servicios → Pantalla de consentimiento de OAuth**:
+   - Tipo de usuario: **Externo**.
+   - Rellena nombre de la app, tu email de asistencia y de contacto.
+   - Añade tu propia cuenta de Google como usuario de prueba.
+   - ⚠️ **Muy importante**: cuando termines, **PUBLICA la aplicación** (estado *En producción*). Mientras esté en *Prueba*, Google caduca los refresh tokens **cada 7 días** y volverías al mismo problema.
+4. **APIs y servicios → Credenciales → Crear credenciales → ID de cliente de OAuth**:
+   - Tipo de aplicación: **Televisores y dispositivos de entrada limitada** (*TVs and Limited Input devices*).
+   - Copia el **Client ID** y el **Client Secret**.
+5. En tu ordenador, con las dependencias instaladas (`pip install -r requirements.txt`):
+
    ```bash
-   pip install ytmusicapi
-   ytmusicapi browser
+   python setup_ytm_oauth.py
    ```
-   Pega las cabeceras que te solicite el asistente y se generará un archivo `browser.json`.
-7. Abre el contenido de ese archivo `browser.json` (o la cadena JSON con las cabeceras) y cópialo. Ese texto completo será el valor de `YTM_HEADERS_JSON`.
+
+   - Pega el Client ID y el Client Secret cuando te los pida.
+   - Se abrirá el navegador con un código: inicia sesión **con la misma cuenta de Google que usas en YouTube Music** y acepta.
+   - El script verifica que llega a tu biblioteca e imprime los **3 valores** listos para copiar.
 
 ---
 
-### Paso 2: Crear App en Spotify Developer Dashboard
+### Paso 2: Crear la app en Spotify Developer Dashboard
 
-1. Ve a [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) e inicia sesión con tu cuenta.
-2. Haz clic en **Create app**:
+1. Ve a [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) → **Create app**:
    - **App name**: `YTM Sync`
-   - **App description**: `Sync liked songs from YTM`
-   - **Redirect URIs**: Añade exactamente `http://127.0.0.1:9090`
-   - Marca la casilla de aceptación de términos y haz clic en **Save**.
-3. En la configuración de la app (**Settings**):
-   - Copia el **Client ID** (`SPOTIPY_CLIENT_ID`).
-   - Haz clic en **View client secret** y copia el **Client Secret** (`SPOTIPY_CLIENT_SECRET`).
+   - **Redirect URIs**: exactamente `http://127.0.0.1:9090`
+2. En **Settings** copia el **Client ID** y el **Client Secret**.
 
 ---
 
 ### Paso 3: Obtener el `SPOTIPY_REFRESH_TOKEN`
 
-Hemos incluido el script auxiliar `get_spotify_token.py` para obtener el refresh token en menos de 1 minuto:
+1. Crea un archivo `.env` con tu client id/secret de Spotify (ver `.env.example`).
+2. Ejecuta:
 
-1. Crea un archivo `.env` en la raíz del proyecto con tu Client ID y Secret:
-   ```env
-   SPOTIPY_CLIENT_ID="tu_client_id"
-   SPOTIPY_CLIENT_SECRET="tu_client_secret"
-   ```
-2. Instala las dependencias y ejecuta el script:
    ```bash
-   pip install -r requirements.txt
    python get_spotify_token.py
    ```
-3. Se abrirá tu navegador solicitando autorización. Haz clic en **Aceptar**.
-4. Serás redirigido a `http://127.0.0.1:9090` y la consola imprimirá tu **`SPOTIPY_REFRESH_TOKEN`**. Cópialo.
+
+3. Acepta en el navegador. Serás redirigido a `http://127.0.0.1:9090` (es normal que la página diga "no se puede acceder") y la consola imprimirá tu refresh token.
 
 ---
 
 ### Paso 4: Obtener el `SPOTIFY_PLAYLIST_ID`
 
-1. En Spotify, crea una playlist (o usa una existente) donde quieras recibir las canciones.
-2. Haz clic en los tres puntos de la playlist -> **Compartir** -> **Copiar enlace a la playlist**.
-3. El enlace tendrá este formato:
-   `https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=...`
-4. El ID es la parte entre `/playlist/` y `?`:
-   `SPOTIFY_PLAYLIST_ID="37i9dQZF1DXcBWIGoYBM5M"`
+Comparte la playlist → *Copiar enlace* → el ID es lo que va entre `/playlist/` y `?`:
+`https://open.spotify.com/playlist/**37i9dQZF1DXcBWIGoYBM5M**?si=…`
+
+*(El script también acepta la URL completa o el URI `spotify:playlist:…`; ya extrae el ID por su cuenta.)*
 
 ---
 
-### Paso 5: Configurar GitHub Secrets
+### Paso 5: Configurar los GitHub Secrets
 
-1. Sube este repositorio a tu cuenta de GitHub (puede ser **público o privado**).
-2. En tu repositorio de GitHub, ve a **Settings** -> **Secrets and variables** -> **Actions**.
-3. Haz clic en **New repository secret** y añade los siguientes 5 secretos:
+En tu repositorio: **Settings → Secrets and variables → Actions → New repository secret**, y añade los 7 secretos de la tabla anterior.
 
-| Nombre del Secreto | Valor |
-| :--- | :--- |
-| `YTM_HEADERS_JSON` | El JSON de cabeceras obtenido en el Paso 1 |
-| `SPOTIPY_CLIENT_ID` | Tu Client ID de Spotify |
-| `SPOTIPY_CLIENT_SECRET` | Tu Client Secret de Spotify |
-| `SPOTIPY_REFRESH_TOKEN` | El Refresh Token generado en el Paso 3 |
-| `SPOTIFY_PLAYLIST_ID` | El ID de la playlist obtenido en el Paso 4 |
+Después, comprueba que todo está bien **sin sincronizar nada**:
+
+**Actions → Sync YouTube Music to Spotify → Run workflow → marca *Solo verificar credenciales* → Run**.
 
 ---
 
 ## ⚙️ Permisos de GitHub Actions
 
-Para que GitHub Actions pueda guardar y commitear automáticamente el archivo de estado `synced_tracks.json`:
+**Settings → Actions → General → Workflow permissions → Read and write permissions**.
 
-1. En tu repositorio, ve a **Settings** -> **Actions** -> **General**.
-2. En la sección **Workflow permissions**, selecciona:
-   - **Read and write permissions**
-3. Haz clic en **Save**.
-
-*(El workflow `.github/workflows/sync.yml` ya incluye explícitamente `permissions: contents: write`)*.
+El workflow necesita `contents: write` (para commitear `synced_tracks.json`) e `issues: write` (para avisarte cuando caduque una credencial). Ambos están declarados en `sync.yml`.
 
 ---
 
-## 🧪 Ejecución Local (Opcional)
+## 🆘 La sesión de YouTube Music ha caducado
 
-Si deseas probar el sincronizador en tu máquina local antes de desplegar:
+Síntoma en los logs:
 
-1. Crea tu archivo `.env` basándote en `.env.example`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Rellena las 5 variables con tus credenciales.
-3. Instala las dependencias:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Ejecuta la sincronización:
-   ```bash
-   python main.py
-   ```
+```text
+KeyError: "Unable to find 'twoColumnBrowseResultsRenderer' ... on
+{'singleColumnBrowseResultsRenderer': ... 'text': 'Sign in' ...}"
+```
+
+**Qué significa**: YouTube Music ha respondido con la página de *usuario no identificado*. Las cookies de `YTM_HEADERS_JSON` ya no valen. Google las invalida con el tiempo, y mucho antes cuando se reutilizan desde una IP de datacenter (los runners de GitHub Actions).
+
+**Solución definitiva**: migrar a OAuth siguiendo el [Paso 1](#paso-1-crear-el-cliente-oauth-de-google-para-youtube-music). Un refresh token propio no caduca por antigüedad; solo dejará de valer si lo revocas, cambias la contraseña de Google o dejas la app en modo *Prueba*.
+
+A partir de ahora, si vuelve a pasar **no lo descubrirás dos semanas tarde**: el workflow abre un issue titulado *"🔐 La sesión de YouTube Music ha caducado"* con los pasos exactos, y lo cierra solo cuando la sincronización se recupera.
+
+### Otros errores frecuentes
+
+| Mensaje | Causa | Solución |
+| :--- | :--- | :--- |
+| `CONFIGURATION ERROR: Missing required ... secret(s)` | Falta un secreto | Añádelo en *Settings → Secrets* |
+| `OAuth client failure ... YouTubeData API is not enabled` | Falta habilitar la API o el client id/secret no coinciden | Paso 1, puntos 2 y 4 |
+| `invalid_grant: Token has been expired or revoked` | App OAuth en modo *Prueba* (7 días) o token revocado | Publica la app y regenera el token |
+| `SPOTIFY AUTHENTICATION FAILED` | Refresh token de Spotify revocado | `python get_spotify_token.py` |
+
+---
+
+## 🧪 Ejecución Local
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env      # y rellena tus valores
+
+python main.py                 # sincronización completa
+python main.py --check-auth    # solo comprueba que ambas credenciales funcionan
+python main.py --dry-run       # busca en Spotify pero no añade nada ni toca el estado
+python main.py --limit 20      # procesa solo los 20 "me gusta" más recientes
+python main.py --verbose       # logs de depuración (incluye por qué se descarta cada candidato)
+python test_sync.py            # tests offline (sin red ni credenciales)
+```
+
+### Códigos de salida
+
+| Código | Significado |
+| :---: | :--- |
+| `0` | Éxito |
+| `1` | Fallo inesperado |
+| `2` | Credenciales de YouTube Music ausentes o caducadas |
+| `3` | Spotify ha rechazado las credenciales |
+| `4` | Falta configuración (algún secreto sin definir) |
 
 ---
 
 ## 📊 Ejemplo de Salida en Logs
 
 ```text
-2026-08-24 15:30:00 [INFO] ============================================================
-2026-08-24 15:30:00 [INFO] Starting YouTube Music -> Spotify Playlist Sync Pipeline
-2026-08-24 15:30:00 [INFO] ============================================================
-2026-08-24 15:30:00 [INFO] Loaded 12 previously synced YouTube track ID(s).
-2026-08-24 15:30:01 [INFO] Refreshing Spotify access token with SPOTIPY_REFRESH_TOKEN...
-2026-08-24 15:30:02 [INFO] Retrieved 12 existing track identifier(s) from target Spotify playlist.
-2026-08-24 15:30:02 [INFO] Fetching up to 50 liked songs from YouTube Music...
-2026-08-24 15:30:03 [INFO] Successfully retrieved 50 liked track(s) from YouTube Music.
-2026-08-24 15:30:03 [INFO] Processing liked songs...
-2026-08-24 15:30:03 [INFO] [1/50] Processing: 'Starboy' by 'The Weeknd' (YT ID: dXN4pTq_...)
-2026-08-24 15:30:04 [INFO]   -> Match found via ISRC (USUM71607007): 'Starboy' by The Weeknd
-2026-08-24 15:30:04 [INFO]   -> [ADDED] Successfully added 'Starboy' to Spotify playlist!
-...
-2026-08-24 15:30:15 [INFO] ============================================================
-2026-08-24 15:30:15 [INFO] SYNCHRONIZATION COMPLETED - SUMMARY REPORT
-2026-08-24 15:30:15 [INFO] ============================================================
-2026-08-24 15:30:15 [INFO]   Total YouTube Liked Songs Checked: 50
-2026-08-24 15:30:15 [INFO]   ✨ Newly Added to Spotify:          4
-2026-08-24 15:30:15 [INFO]   🔁 Already in Spotify Playlist:     34
-2026-08-24 15:30:15 [INFO]   ⏭️  Skipped (Previously Synced):   12
-2026-08-24 15:30:15 [INFO]   ⚠️  Not Found on Spotify:            0
-2026-08-24 15:30:15 [INFO] ============================================================
+2026-09-19 15:30:00 [INFO] ============================================================
+2026-09-19 15:30:00 [INFO] Starting YouTube Music -> Spotify Playlist Sync Pipeline
+2026-09-19 15:30:00 [INFO] ============================================================
+2026-09-19 15:30:00 [INFO] Loading YouTube Music OAuth token from YTM_OAUTH_REFRESH_TOKEN.
+2026-09-19 15:30:01 [INFO] YouTube Music client initialised using OAuth (refresh token).
+2026-09-19 15:30:01 [INFO] Authenticated with YouTube Music as 'Alfred'.
+2026-09-19 15:30:02 [INFO] Refreshing Spotify access token with SPOTIPY_REFRESH_TOKEN...
+2026-09-19 15:30:02 [INFO] Loaded 434 previously synced YouTube track ID(s).
+2026-09-19 15:30:04 [INFO] Retrieved 868 existing track identifier(s) from target Spotify playlist.
+2026-09-19 15:30:06 [INFO] Successfully retrieved 437 liked track(s) from YouTube Music.
+2026-09-19 15:30:06 [INFO] Processing liked songs...
+2026-09-19 15:30:06 [INFO] [436/437] Processing: 'Starboy' by 'The Weeknd' (YT ID: dXN4pTq_)
+2026-09-19 15:30:07 [INFO]   -> Match found via ISRC (USUM71607007): 'Starboy' by The Weeknd
+2026-09-19 15:30:08 [INFO] [ADDED] 3 track(s) added to the Spotify playlist.
+2026-09-19 15:30:08 [INFO] State successfully saved to 'synced_tracks.json'.
+2026-09-19 15:30:08 [INFO] ============================================================
+2026-09-19 15:30:08 [INFO] SYNCHRONIZATION COMPLETED - SUMMARY REPORT
+2026-09-19 15:30:08 [INFO] ============================================================
+2026-09-19 15:30:08 [INFO]   Total YouTube Liked Songs Checked: 437
+2026-09-19 15:30:08 [INFO]   [+] Newly Added to Spotify:        3
+2026-09-19 15:30:08 [INFO]   [=] Already in Spotify Playlist:   0
+2026-09-19 15:30:08 [INFO]   [-] Skipped (Previously Synced):   434
+2026-09-19 15:30:08 [INFO]   [!] Not Found on Spotify:          0
+2026-09-19 15:30:08 [INFO] ============================================================
 ```
 
 ---
@@ -193,6 +221,6 @@ Si deseas probar el sincronizador en tu máquina local antes de desplegar:
 ## 🛠️ Tecnologías Empleadas
 
 - **Python 3.11+**
-- **ytmusicapi**: Extracción autenticada y parsing de YouTube Music.
-- **spotipy**: Cliente oficial y flujo OAuth2 Refresh Token para Spotify Web API.
-- **GitHub Actions**: Orquestación CI/CD y automatización programada en cron sin costes de servidor.
+- **ytmusicapi**: acceso autenticado (OAuth) a YouTube Music.
+- **spotipy**: cliente de la Spotify Web API con refresh automático del access token y reintentos ante `429`/`5xx`.
+- **GitHub Actions**: orquestación en cron sin coste de servidor.

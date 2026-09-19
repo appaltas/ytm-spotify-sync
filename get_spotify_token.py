@@ -9,18 +9,13 @@ Prerequisites:
 2. In Spotify Developer Dashboard, ensure "http://127.0.0.1:9090" is added to Redirect URIs.
 """
 
-import os
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-import spotipy
+from spotipy.cache_handler import MemoryCacheHandler
 from spotipy.oauth2 import SpotifyOAuth
 
-CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
+from config import env
+
+CLIENT_ID = env("SPOTIPY_CLIENT_ID")
+CLIENT_SECRET = env("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = "http://127.0.0.1:9090"
 SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private"
 
@@ -40,6 +35,8 @@ def main():
         redirect_uri=REDIRECT_URI,
         scope=SCOPE,
         open_browser=True,
+        # Keep the token in memory: no stray .cache file with credentials on disk.
+        cache_handler=MemoryCacheHandler(),
     )
 
     print("\n1. Opening browser for Spotify Authorization...")

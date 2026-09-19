@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Política de privacidad – YTSYNCSPOT</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1f2328; --muted: #57606a; --bg: #ffffff; --card: #f6f8fa; --accent: #1a7f37; }
+    @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #9da7b3; --bg: #0d1117; --card: #161b22; --accent: #3fb950; } }
+    body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); line-height: 1.6; }
+    main { max-width: 720px; margin: 0 auto; padding: 48px 16px 64px; }
+    h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+    .sub { color: var(--muted); margin: 0 0 2rem; }
+    h2 { margin-top: 2rem; font-size: 1.2rem; }
+    a { color: var(--accent); }
+    ul li { margin: .3rem 0; }
+    footer { color: var(--muted); font-size: .9rem; margin-top: 3rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Política de privacidad</h1>
+    <p class="sub">YTSYNCSPOT · Última actualización: 19 de septiembre de 2026</p>
+
+    <p>YTSYNCSPOT es una aplicación de uso personal, operada por su propietario para sincronizar su propia cuenta de YouTube Music con su propia cuenta de Spotify. No está destinada al público general ni presta servicio a terceros.</p>
+
+    <h2>Qué datos se acceden</h2>
+    <ul>
+      <li><strong>YouTube Music:</strong> la lista de canciones marcadas con “Me gusta” de la cuenta de Google que autoriza la aplicación (títulos, artistas, duración e identificadores de vídeo). Se utiliza el permiso <code>https://www.googleapis.com/auth/youtube</code>, pero la aplicación solo realiza operaciones de lectura sobre esa lista.</li>
+      <li><strong>Spotify:</strong> el contenido de una playlist elegida por el propietario, para añadir canciones y evitar duplicados.</li>
+    </ul>
+
+    <h2>Para qué se usan</h2>
+    <p>Exclusivamente para localizar en Spotify las canciones que el propietario ha marcado con “Me gusta” en YouTube Music y añadirlas a su playlist. No se realiza ningún otro tratamiento, análisis ni perfilado.</p>
+
+    <h2>Qué se almacena y dónde</h2>
+    <ul>
+      <li>Los identificadores de vídeo de las canciones ya procesadas, en un archivo de texto dentro del repositorio del proyecto, para no repetir trabajo.</li>
+      <li>Los tokens de acceso de Google y Spotify, como secretos cifrados de GitHub Actions. Nunca se escriben en el repositorio ni en registros.</li>
+    </ul>
+    <p>No se almacenan contraseñas, correos electrónicos ni ningún otro dato de la cuenta.</p>
+
+    <h2>Compartición con terceros</h2>
+    <p>Ningún dato se vende, cede ni comparte con terceros. Los únicos servicios que reciben datos son Google (YouTube) y Spotify, a través de sus API oficiales y únicamente para la finalidad descrita.</p>
+
+    <h2>Uso de los datos de la API de Google</h2>
+    <p>El uso de la información recibida de las API de Google se ajusta a la <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de datos de usuario de los servicios de API de Google</a>, incluidos los requisitos de uso limitado.</p>
+
+    <h2>Cómo revocar el acceso</h2>
+    <p>El acceso puede revocarse en cualquier momento desde <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> (Google) y desde <a href="https://www.spotify.com/account/apps/">spotify.com/account/apps</a> (Spotify). Al revocarlo, la aplicación deja de poder acceder a los datos de inmediato.</p>
+
+    <h2>Contacto</h2>
+    <p>Para cualquier consulta sobre esta política: <a href="mailto:alfredspain@gmail.com">alfredspain@gmail.com</a>.</p>
+
+    <footer>
+      <p><a href="index.html">Inicio</a> · <a href="https://github.com/appaltas/ytm-spotify-sync">Código fuente</a></p>
+    </footer>
+  </main>
+</body>
+</html>
