@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-YouTube Music authentication
-============================
-OAuth-first authentication layer for ytmusicapi with explicit detection of
-expired / revoked sessions.
+Liked-songs sources and authentication
+======================================
+Decides how the user's YouTube Music likes are read and turns credential
+failures into one actionable error type.
 
-Why OAuth: browser cookies (``YTM_HEADERS_JSON``) are tied to a Google web
-session. Google rotates and invalidates those cookies, and it does so much
-faster when the same cookie is replayed from a datacenter IP (a GitHub Actions
-runner). When that happens YouTube Music answers with the *signed out* page
-instead of the library, which surfaces as a cryptic
-``KeyError: 'twoColumnBrowseResultsRenderer'``. An OAuth refresh token issued to
-your own Google Cloud client does not expire on its own, so unattended syncs
-keep working.
+Two sources, in order of preference:
 
-Credential precedence:
-1. ``YTM_OAUTH_JSON``          - full oauth token JSON (string or file path)
-2. ``YTM_OAUTH_REFRESH_TOKEN`` - just the refresh token (recommended for CI)
-3. ``YTM_HEADERS_JSON``        - legacy browser headers (deprecated fallback)
+1. **OAuth + YouTube Data API v3** (``YTM_OAUTH_*``). A refresh token issued by
+   the user's own Google Cloud client. Does not expire on its own once the
+   consent screen is published, and the Data API is an official, documented
+   surface - the right choice for unattended CI.
+2. **Browser cookies + ytmusicapi** (``YTM_HEADERS_JSON``). Deprecated. Google
+   invalidates those cookies regularly, much faster when they are replayed
+   from a datacenter IP, and the failure surfaces as a cryptic
+   ``KeyError: 'twoColumnBrowseResultsRenderer'`` (the signed-out page).
+
+Note: ytmusicapi's own OAuth mode is *not* used. music.youtube.com's private
+API rejects bearer tokens from third-party clients with HTTP 400 (see
+sigma67/ytmusicapi#676), while the public Data API accepts the same token.
 """
 
 from __future__ import annotations
@@ -25,15 +26,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from ytmusicapi import OAuthCredentials, YTMusic
+import requests
 
 from config import env
+from models import TrackInfo
+from youtube_data import GoogleOAuthError, YouTubeApiError, YouTubeDataClient, refresh_access_token
 
 logger = logging.getLogger("ytm_spotify_sync.auth")
-
-OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
 
 #: Fingerprints of a "you are signed out" answer from YouTube Music, or of a
 #: refresh token Google no longer accepts.
@@ -50,7 +52,7 @@ _EXPIRED_MARKERS = (
 )
 
 OAUTH_REMEDIATION = (
-    "The YouTube Music OAuth token was rejected. Regenerate it locally with\n"
+    "Google rejected the YouTube OAuth credentials. Regenerate the token locally with\n"
     "    python setup_ytm_oauth.py\n"
     "and update the YTM_OAUTH_REFRESH_TOKEN repository secret.\n"
     "Also make sure the OAuth consent screen is PUBLISHED: while it is in "
@@ -68,13 +70,13 @@ BROWSER_REMEDIATION = (
 )
 
 MISSING_REMEDIATION = (
-    "No usable YouTube Music credentials. Run 'python setup_ytm_oauth.py' and set "
+    "No usable YouTube credentials. Run 'python setup_ytm_oauth.py' and set "
     "YTM_OAUTH_CLIENT_ID, YTM_OAUTH_CLIENT_SECRET and YTM_OAUTH_REFRESH_TOKEN."
 )
 
 
 class YouTubeMusicAuthError(RuntimeError):
-    """Raised when YouTube Music credentials are missing, invalid or expired."""
+    """Raised when YouTube credentials are missing, invalid or expired."""
 
     def __init__(self, message: str, remediation: str = "") -> None:
         super().__init__(message)
@@ -82,73 +84,216 @@ class YouTubeMusicAuthError(RuntimeError):
 
 
 def looks_like_expired_session(error: BaseException | str) -> bool:
-    """Heuristic: does this failure mean 'YouTube Music considers us signed out'?"""
+    """Heuristic: does this failure mean 'YouTube considers us signed out'?"""
     text = str(error).lower()
     return any(marker in text for marker in _EXPIRED_MARKERS)
 
 
-def _normalize_oauth_token(data: dict[str, Any]) -> dict[str, Any]:
-    """
-    Builds the token payload ytmusicapi expects from whatever the user stored.
-
-    ``expires_at`` is forced to 0 so the very first request always trades the
-    refresh token for a fresh access token: CI runs are stateless, so a cached
-    access token is always stale by the next run.
-    """
-    refresh_token = str(data.get("refresh_token") or "").strip()
-    if not refresh_token:
-        raise YouTubeMusicAuthError(
-            "OAuth payload does not contain a 'refresh_token'.", MISSING_REMEDIATION
-        )
-
-    return {
-        "scope": data.get("scope") or OAUTH_SCOPE,
-        "token_type": data.get("token_type") or "Bearer",
-        "access_token": data.get("access_token") or "",
-        "refresh_token": refresh_token,
-        "expires_at": 0,
-        "expires_in": 0,
-    }
+def remediation_for(auth_mode: str) -> str:
+    """Returns the actionable fix text for the auth mode in use."""
+    return OAUTH_REMEDIATION if auth_mode == "oauth" else BROWSER_REMEDIATION
 
 
-def _load_oauth_token() -> Optional[dict[str, Any]]:
-    """Reads the OAuth token from YTM_OAUTH_JSON or YTM_OAUTH_REFRESH_TOKEN."""
+# --------------------------------------------------------------------------- #
+# Sources
+# --------------------------------------------------------------------------- #
+
+
+class LikedSongsSource(ABC):
+    """Anything that can tell us who we are and what the user liked."""
+
+    mode: str = "unknown"
+
+    @abstractmethod
+    def describe(self) -> Optional[str]:
+        """Best-effort identity probe; returns the account/channel name."""
+
+    @abstractmethod
+    def fetch_liked(self, limit: Optional[int] = None) -> list[TrackInfo]:
+        """Liked songs, most recent first, all of them unless ``limit`` is given."""
+
+
+class DataApiSource(LikedSongsSource):
+    """OAuth refresh token -> YouTube Data API v3."""
+
+    mode = "oauth"
+
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str) -> None:
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._refresh_token = refresh_token
+        self._session = requests.Session()
+        self._client: Optional[YouTubeDataClient] = None
+
+    def _ensure_client(self) -> YouTubeDataClient:
+        if self._client is None:
+            try:
+                token = refresh_access_token(
+                    self._client_id, self._client_secret, self._refresh_token, self._session
+                )
+            except GoogleOAuthError as exc:
+                raise YouTubeMusicAuthError(
+                    f"Google rejected the OAuth refresh token ({exc}).", OAUTH_REMEDIATION
+                ) from exc
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Could not reach Google's token endpoint: {exc}") from exc
+            self._client = YouTubeDataClient(token["access_token"], self._session)
+            logger.info("YouTube client initialised using OAuth (refresh token) + Data API v3.")
+        return self._client
+
+    def _translate(self, exc: YouTubeApiError) -> Exception:
+        """Maps Data API failures to the project's error types."""
+        if exc.status == 401:
+            return YouTubeMusicAuthError(f"YouTube rejected the access token: {exc}", OAUTH_REMEDIATION)
+        if exc.status == 403 and exc.reason in ("accessNotConfigured", "forbidden", "insufficientPermissions"):
+            return YouTubeMusicAuthError(
+                f"The Google Cloud project cannot use the YouTube Data API v3: {exc}. "
+                "Enable 'YouTube Data API v3' in the project and make sure the token was "
+                "granted the youtube / youtube.readonly scope.",
+                OAUTH_REMEDIATION,
+            )
+        if exc.status == 403 and exc.reason in ("quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"):
+            return RuntimeError(
+                f"YouTube Data API quota exhausted ({exc.reason}); it resets at midnight Pacific time. "
+                "A normal sync uses ~15 of the 10,000 daily units, so check for other apps on the project."
+            )
+        return RuntimeError(f"YouTube Data API request failed: {exc}")
+
+    def describe(self) -> Optional[str]:
+        try:
+            title = self._ensure_client().channel_title()
+        except YouTubeApiError as exc:
+            translated = self._translate(exc)
+            if isinstance(translated, YouTubeMusicAuthError):
+                raise translated from exc
+            logger.warning("Could not read the YouTube channel name (continuing anyway): %s", exc)
+            return None
+        if title:
+            logger.info("Authenticated with YouTube as '%s'.", title)
+        return title
+
+    def fetch_liked(self, limit: Optional[int] = None) -> list[TrackInfo]:
+        if limit:
+            logger.info("Fetching up to %d liked songs from the YouTube Data API...", limit)
+        else:
+            logger.info("Fetching all liked songs from the YouTube Data API...")
+        try:
+            return self._ensure_client().liked_music(limit=limit)
+        except YouTubeApiError as exc:
+            raise self._translate(exc) from exc
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Network error while reading liked songs: {exc}") from exc
+
+
+class CookieSource(LikedSongsSource):
+    """Deprecated: browser cookies -> ytmusicapi private API."""
+
+    mode = "browser"
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def describe(self) -> Optional[str]:
+        try:
+            info = self._client.get_account_info()
+        except Exception as exc:
+            if looks_like_expired_session(exc):
+                raise YouTubeMusicAuthError(
+                    f"YouTube Music reports the session as signed out: {exc}", BROWSER_REMEDIATION
+                ) from exc
+            logger.warning("Could not read YouTube Music account info (continuing anyway): %s", exc)
+            return None
+        account_name = info.get("accountName")
+        if account_name:
+            logger.info("Authenticated with YouTube Music as '%s'.", account_name)
+        return account_name
+
+    def fetch_liked(self, limit: Optional[int] = None) -> list[TrackInfo]:
+        if limit:
+            logger.info("Fetching up to %d liked songs from YouTube Music...", limit)
+        else:
+            logger.info("Fetching all liked songs from YouTube Music library...")
+
+        try:
+            liked_response = self._client.get_liked_songs(limit=limit)
+        except Exception as exc:
+            if looks_like_expired_session(exc):
+                raise YouTubeMusicAuthError(
+                    f"YouTube Music answered as a signed-out user: {exc}", BROWSER_REMEDIATION
+                ) from exc
+            raise RuntimeError(f"Failed to fetch liked songs from YouTube Music: {exc}") from exc
+
+        tracks_raw = liked_response.get("tracks", []) if isinstance(liked_response, dict) else []
+        logger.info("Successfully retrieved %d liked track(s) from YouTube Music.", len(tracks_raw))
+
+        tracks: list[TrackInfo] = []
+        for item in tracks_raw:
+            video_id = item.get("videoId")
+            title = item.get("title")
+            if not video_id or not title:
+                continue
+            artists = item.get("artists") or []
+            primary_artist = artists[0].get("name", "Unknown Artist") if artists else "Unknown Artist"
+            album = item.get("album")
+            isrc = item.get("isrc") or (album.get("isrc") if isinstance(album, dict) else None)
+            duration = item.get("duration_seconds")
+            tracks.append(
+                TrackInfo(
+                    video_id=video_id,
+                    title=title,
+                    artist=primary_artist,
+                    isrc=isrc,
+                    duration_seconds=int(duration) if isinstance(duration, int) else None,
+                )
+            )
+        return tracks
+
+
+# --------------------------------------------------------------------------- #
+# Credential loading
+# --------------------------------------------------------------------------- #
+
+
+def _load_refresh_token() -> Optional[str]:
+    """Reads the OAuth refresh token from YTM_OAUTH_JSON or YTM_OAUTH_REFRESH_TOKEN."""
     raw = env("YTM_OAUTH_JSON")
     if raw:
         if os.path.isfile(raw):
-            logger.info("Loading YouTube Music OAuth token from file '%s'.", raw)
+            logger.info("Loading YouTube OAuth token from file '%s'.", raw)
             with open(raw, "r", encoding="utf-8") as handle:
-                return _normalize_oauth_token(json.load(handle))
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
+                parsed = json.load(handle)
+        else:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise YouTubeMusicAuthError(
+                    f"YTM_OAUTH_JSON is neither valid JSON nor an existing file path: {exc}",
+                    MISSING_REMEDIATION,
+                ) from exc
+            logger.info("Loading YouTube OAuth token from YTM_OAUTH_JSON.")
+        if not isinstance(parsed, dict) or not str(parsed.get("refresh_token") or "").strip():
             raise YouTubeMusicAuthError(
-                f"YTM_OAUTH_JSON is neither valid JSON nor an existing file path: {exc}",
+                "YTM_OAUTH_JSON must be a JSON object containing a 'refresh_token'.",
                 MISSING_REMEDIATION,
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise YouTubeMusicAuthError("YTM_OAUTH_JSON must be a JSON object.", MISSING_REMEDIATION)
-        logger.info("Loading YouTube Music OAuth token from YTM_OAUTH_JSON.")
-        return _normalize_oauth_token(parsed)
+            )
+        return str(parsed["refresh_token"]).strip()
 
     refresh_token = env("YTM_OAUTH_REFRESH_TOKEN")
     if refresh_token:
-        logger.info("Loading YouTube Music OAuth token from YTM_OAUTH_REFRESH_TOKEN.")
-        return _normalize_oauth_token({"refresh_token": refresh_token})
-
+        logger.info("Loading YouTube OAuth token from YTM_OAUTH_REFRESH_TOKEN.")
+        return refresh_token
     return None
 
 
-def build_ytmusic_client() -> tuple[YTMusic, str]:
+def build_liked_songs_source() -> LikedSongsSource:
     """
-    Builds an authenticated YTMusic client.
+    Picks and initialises the liked-songs source from the environment.
 
-    :return: tuple of (client, auth mode used: 'oauth' or 'browser')
+    Credential problems surface here, loudly, before any state or playlist work.
     :raises YouTubeMusicAuthError: when credentials are missing or rejected.
     """
-    token = _load_oauth_token()
-
-    if token:
+    refresh_token = _load_refresh_token()
+    if refresh_token:
         client_id = env("YTM_OAUTH_CLIENT_ID")
         client_secret = env("YTM_OAUTH_CLIENT_SECRET")
         if not client_id or not client_secret:
@@ -157,24 +302,14 @@ def build_ytmusic_client() -> tuple[YTMusic, str]:
                 "missing. A refresh token can only be redeemed by the client that issued it.",
                 MISSING_REMEDIATION,
             )
-        try:
-            credentials = OAuthCredentials(client_id=client_id, client_secret=client_secret)
-            client = YTMusic(auth=token, oauth_credentials=credentials)
-            # Touch the token so an unusable refresh token fails here, loudly,
-            # instead of halfway through the sync.
-            _ = client._token.access_token  # noqa: SLF001 - intentional early validation
-        except YouTubeMusicAuthError:
-            raise
-        except Exception as exc:
-            raise YouTubeMusicAuthError(
-                f"YouTube Music OAuth initialisation failed: {exc}", OAUTH_REMEDIATION
-            ) from exc
-
-        logger.info("YouTube Music client initialised using OAuth (refresh token).")
-        return client, "oauth"
+        source = DataApiSource(client_id, client_secret, refresh_token)
+        source._ensure_client()  # noqa: SLF001 - fail fast on a dead refresh token
+        return source
 
     raw_headers = env("YTM_HEADERS_JSON")
     if raw_headers:
+        from ytmusicapi import YTMusic  # imported lazily: only the legacy path needs it
+
         logger.warning(
             "Using deprecated browser-cookie authentication (YTM_HEADERS_JSON). These cookies "
             "expire regularly when replayed from CI - migrate to OAuth with "
@@ -193,40 +328,10 @@ def build_ytmusic_client() -> tuple[YTMusic, str]:
                 f"Failed to initialise YouTube Music client from browser headers: {exc}",
                 BROWSER_REMEDIATION,
             ) from exc
-        return client, "browser"
+        return CookieSource(client)
 
     raise YouTubeMusicAuthError(
-        "No YouTube Music credentials configured (YTM_OAUTH_REFRESH_TOKEN / YTM_OAUTH_JSON / "
+        "No YouTube credentials configured (YTM_OAUTH_REFRESH_TOKEN / YTM_OAUTH_JSON / "
         "YTM_HEADERS_JSON are all empty).",
         MISSING_REMEDIATION,
     )
-
-
-def remediation_for(auth_mode: str) -> str:
-    """Returns the actionable fix text for the auth mode in use."""
-    return OAUTH_REMEDIATION if auth_mode == "oauth" else BROWSER_REMEDIATION
-
-
-def describe_session(client: YTMusic, auth_mode: str) -> Optional[str]:
-    """
-    Best-effort identity probe. Returns the account name when available.
-
-    A clear "signed out" answer is raised as YouTubeMusicAuthError so the run
-    stops immediately with actionable output; anything else is only logged,
-    because this probe must never be the reason a healthy sync fails.
-    """
-    try:
-        info = client.get_account_info()
-    except Exception as exc:
-        if looks_like_expired_session(exc):
-            raise YouTubeMusicAuthError(
-                f"YouTube Music reports the session as signed out: {exc}",
-                remediation_for(auth_mode),
-            ) from exc
-        logger.warning("Could not read YouTube Music account info (continuing anyway): %s", exc)
-        return None
-
-    account_name = info.get("accountName")
-    if account_name:
-        logger.info("Authenticated with YouTube Music as '%s'.", account_name)
-    return account_name

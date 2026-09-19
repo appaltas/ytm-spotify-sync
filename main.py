@@ -32,13 +32,8 @@ from spotipy.cache_handler import MemoryCacheHandler
 from spotipy.oauth2 import SpotifyOAuth
 
 from config import env, extract_playlist_id
-from ytm_auth import (
-    YouTubeMusicAuthError,
-    build_ytmusic_client,
-    describe_session,
-    looks_like_expired_session,
-    remediation_for,
-)
+from models import TrackInfo
+from ytm_auth import YouTubeMusicAuthError, build_liked_songs_source
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -78,17 +73,6 @@ class ConfigurationError(RuntimeError):
 
 class SpotifyAuthError(RuntimeError):
     """Raised when Spotify rejects the configured credentials."""
-
-
-@dataclass
-class TrackInfo:
-    """Represents normalized track metadata extracted from YouTube Music."""
-
-    video_id: str
-    title: str
-    artist: str
-    isrc: Optional[str] = None
-    duration_seconds: Optional[int] = None
 
 
 @dataclass
@@ -328,11 +312,16 @@ def is_plausible_match(track: TrackInfo, sp_track: dict[str, Any], *, relaxed: b
     if not relaxed:
         return True, ""
 
-    title_score = _text_score(clean_track_title(track.title), sp_track.get("name", ""))
+    # The raw video title ("Artist - Song (Official Video)") carries both names
+    # in whichever order, so it is checked alongside the derived fields.
+    haystack = clean_track_title(track.raw_title or track.title)
+    sp_name = sp_track.get("name", "")
+    title_score = max(_text_score(clean_track_title(track.title), sp_name), _text_score(haystack, sp_name))
     if title_score < 0.6:
         return False, f"title similarity {title_score:.2f}"
 
-    artist_score = _text_score(track.artist, _spotify_artists(sp_track))
+    sp_artists = _spotify_artists(sp_track)
+    artist_score = max(_text_score(track.artist, sp_artists), _text_score(haystack, sp_artists))
     if artist_score < 0.5 and (delta is None or delta > 10):
         return False, f"artist similarity {artist_score:.2f}"
 
@@ -381,8 +370,15 @@ def search_spotify_track(sp: spotipy.Spotify, track: TrackInfo) -> Optional[dict
     except Exception as e:
         logger.debug(f"Strict search failed for '{strict_query}': {e}")
 
-    # 3. Relaxed free-text query, validated before accepting.
-    relaxed_query = f"{safe_title} {safe_artist}".strip()
+    # 3. Relaxed free-text query on the full video title (it usually carries both
+    #    artist and song, in whichever order), validated before accepting.
+    #    Bracketed chatter ("(ineditas 2010)", "[HD]") only hurts the search.
+    raw = clean_track_title(track.raw_title or track.title).replace('"', "").strip()
+    raw = re.sub(r"\s*[\(\[].*$", "", raw).strip() or raw
+    if _normalize_for_match(safe_artist) in _normalize_for_match(raw):
+        relaxed_query = raw
+    else:
+        relaxed_query = f"{raw} {safe_artist}".strip()
     try:
         res = sp.search(q=relaxed_query, type="track", limit=5)
         for candidate in res.get("tracks", {}).get("items", []):
@@ -398,60 +394,6 @@ def search_spotify_track(sp: spotipy.Spotify, track: TrackInfo) -> Optional[dict
         logger.debug(f"Relaxed search failed for '{relaxed_query}': {e}")
 
     return None
-
-
-# --------------------------------------------------------------------------- #
-# YouTube Music
-# --------------------------------------------------------------------------- #
-
-
-def fetch_ytmusic_liked_songs(ytmusic, auth_mode: str, limit: Optional[int] = None) -> list[TrackInfo]:
-    """
-    Retrieves liked songs from YouTube Music (all by default, or up to limit)
-    and extracts normalized metadata.
-    """
-    if limit:
-        logger.info(f"Fetching up to {limit} liked songs from YouTube Music...")
-    else:
-        logger.info("Fetching all liked songs from YouTube Music library...")
-
-    try:
-        liked_response = ytmusic.get_liked_songs(limit=limit)
-    except Exception as e:
-        if looks_like_expired_session(e):
-            raise YouTubeMusicAuthError(
-                f"YouTube Music answered as a signed-out user: {e}", remediation_for(auth_mode)
-            ) from e
-        raise RuntimeError(f"Failed to fetch liked songs from YouTube Music: {e}") from e
-
-    tracks_raw = liked_response.get("tracks", []) if isinstance(liked_response, dict) else []
-    logger.info(f"Successfully retrieved {len(tracks_raw)} liked track(s) from YouTube Music.")
-
-    extracted_tracks: list[TrackInfo] = []
-    for item in tracks_raw:
-        video_id = item.get("videoId")
-        title = item.get("title")
-        if not video_id or not title:
-            continue
-
-        artists = item.get("artists") or []
-        primary_artist = artists[0].get("name", "Unknown Artist") if artists else "Unknown Artist"
-
-        album = item.get("album")
-        isrc = item.get("isrc") or (album.get("isrc") if isinstance(album, dict) else None)
-
-        duration = item.get("duration_seconds")
-        extracted_tracks.append(
-            TrackInfo(
-                video_id=video_id,
-                title=title,
-                artist=primary_artist,
-                isrc=isrc,
-                duration_seconds=int(duration) if isinstance(duration, int) else None,
-            )
-        )
-
-    return extracted_tracks
 
 
 # --------------------------------------------------------------------------- #
@@ -506,13 +448,13 @@ def run_sync(
 
     # 1. Authenticate both sides first: credentials problems must surface in
     #    seconds, before any state or playlist work.
-    ytmusic, auth_mode = build_ytmusic_client()
-    describe_session(ytmusic, auth_mode)
+    source = build_liked_songs_source()
+    source.describe()
     sp = get_spotify_client()
 
     if check_auth_only:
         # Prove both tokens actually reach their APIs.
-        fetch_ytmusic_liked_songs(ytmusic, auth_mode, limit=1)
+        source.fetch_liked(limit=1)
         sp.playlist_items(playlist_id, fields="items.track.id", limit=1, additional_types=["track"])
         logger.info("Credential check passed: YouTube Music and Spotify are both reachable.")
         return SyncStats()
@@ -526,8 +468,8 @@ def run_sync(
     # 3. Retrieve current playlist track IDs from Spotify
     existing_spotify_ids = get_spotify_playlist_track_ids(sp, playlist_id)
 
-    # 4. Fetch Liked Songs from YouTube Music
-    liked_tracks = fetch_ytmusic_liked_songs(ytmusic, auth_mode, limit=limit)
+    # 4. Fetch Liked Songs from YouTube
+    liked_tracks = source.fetch_liked(limit=limit)
 
     stats = SyncStats(total_processed=len(liked_tracks))
     pending: list[tuple[str, str]] = []

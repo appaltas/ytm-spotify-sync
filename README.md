@@ -9,18 +9,19 @@ Automatización completa para sincronizar tus canciones con **"Me gusta"** de **
 
 ## 🚀 Características Principales
 
-- 🔐 **Autenticación OAuth para YouTube Music**: un *refresh token* propio que **no caduca solo**, en lugar de cookies del navegador que Google invalida cada pocas semanas (más aún cuando se usan desde un runner de GitHub).
+- 🔐 **OAuth + YouTube Data API v3 (oficial)**: los "Me gusta" se leen con un *refresh token* de tu propio cliente de Google, a través de la API pública y documentada de YouTube. **No caduca solo** (con la app publicada) y no depende de la API privada de music.youtube.com, que rechaza tokens OAuth externos. Coste: ~15 de las 10.000 unidades diarias de cuota.
 - 🔔 **Aviso automático cuando algo caduca**: si una credencial deja de funcionar, el workflow **abre un issue en el repositorio** (y te llega por email). Cuando la sincronización vuelve a funcionar, el issue **se cierra solo**.
 - 🔄 **Sincronización periódica** cada 3 horas vía cron, y **manual** desde la pestaña *Actions* (con opciones de *solo verificar credenciales* y *simulacro*).
 - 🎯 **Búsqueda jerárquica e inteligente**:
-  1. Coincidencia exacta por código **ISRC**.
+  1. Coincidencia exacta por código **ISRC** (cuando existe).
   2. Búsqueda estricta por `track:"TÍTULO"` + `artist:"ARTISTA"`.
-  3. Búsqueda relajada con limpieza de títulos (`(Official Video)`, `[Lyrics]`, …).
+  3. Búsqueda relajada sobre el título completo del vídeo, con limpieza de ruido (`(Official Video)`, `[Lyrics]`, notas entre paréntesis…).
 - 🛡️ **Validación de coincidencias**: descarta resultados cuya duración se desvía más de 30 s o cuyo título/artista no se parecen, para no meter en tu playlist un *cover*, un directo o un mix de una hora.
 - ⚡ **Altas por lotes**: las canciones se añaden de 100 en 100 (antes: una petición por canción).
 - 💾 **Estado a prueba de cortes**: `synced_tracks.json` se guarda incluso si la ejecución falla a mitad, así que nunca se repite trabajo ya hecho.
 - ✅ **Tests offline** (`test_sync.py`) que se ejecutan en cada run antes de tocar ninguna API.
-- 🔒 **Seguridad**: credenciales solo en **GitHub Secrets**; ningún token se escribe en disco durante la ejecución.
+- 🔒 **Seguridad**: credenciales solo en **GitHub Secrets**; permiso de YouTube de **solo lectura**; ningún token se escribe en disco durante la ejecución.
+- 🧯 **Fallback**: las cookies del navegador (`YTM_HEADERS_JSON`, vía `ytmusicapi`) siguen funcionando si no hay OAuth, pero están en desuso.
 
 ---
 
@@ -31,11 +32,16 @@ Automatización completa para sincronizar tus canciones con **"Me gusta"** de **
 ├── .github/
 │   └── workflows/
 │       └── sync.yml          # Cron cada 3h + commit de estado + aviso por issue
+├── docs/
+│   ├── index.html            # Página pública (GitHub Pages) exigida por Google para publicar la app
+│   └── privacy.html          # Política de privacidad (ídem)
 ├── .env.example              # Plantilla de variables de entorno
 ├── config.py                 # Lectura y saneado de variables/secretos
-├── ytm_auth.py               # Autenticación de YouTube Music (OAuth + detección de caducidad)
+├── models.py                 # Modelo TrackInfo compartido
+├── youtube_data.py           # Cliente de la YouTube Data API v3 (Me gusta, duración, artista)
+├── ytm_auth.py               # Fuentes de "Me gusta": OAuth (Data API) o cookies (ytmusicapi) + errores accionables
 ├── main.py                   # Pipeline de sincronización
-├── setup_ytm_oauth.py        # Genera el refresh token de YouTube Music (ejecutar una vez)
+├── setup_ytm_oauth.py        # Genera el refresh token de YouTube (ejecutar una vez)
 ├── get_spotify_token.py      # Genera el refresh token de Spotify (ejecutar una vez)
 ├── test_sync.py              # Tests offline (sin red ni credenciales)
 ├── requirements.txt          # Dependencias Python
@@ -50,7 +56,7 @@ Automatización completa para sincronizar tus canciones con **"Me gusta"** de **
 | :--- | :--- |
 | `YTM_OAUTH_CLIENT_ID` | Client ID de tu cliente OAuth de Google |
 | `YTM_OAUTH_CLIENT_SECRET` | Client Secret de ese mismo cliente |
-| `YTM_OAUTH_REFRESH_TOKEN` | Refresh token de YouTube Music (no caduca solo) |
+| `YTM_OAUTH_REFRESH_TOKEN` | Refresh token de YouTube (no caduca solo con la app publicada) |
 | `SPOTIPY_CLIENT_ID` | Client ID de tu app en Spotify Developer Dashboard |
 | `SPOTIPY_CLIENT_SECRET` | Client Secret de esa app |
 | `SPOTIPY_REFRESH_TOKEN` | Refresh token de OAuth de Spotify |
@@ -60,29 +66,52 @@ Automatización completa para sincronizar tus canciones con **"Me gusta"** de **
 
 ---
 
-### Paso 1: Crear el cliente OAuth de Google (para YouTube Music)
+### Paso 1: Crear el cliente OAuth de Google (para YouTube)
 
-Solo se hace una vez y es gratis.
+Solo se hace una vez y es gratis. Son varios pasos porque Google exige una página pública y una política de privacidad para **publicar** la app, y sin publicarla el token caduca a los 7 días.
+
+#### 1a. Proyecto y API
 
 1. Entra en [Google Cloud Console](https://console.cloud.google.com/) y crea un proyecto (por ejemplo `ytm-sync`).
 2. **APIs y servicios → Biblioteca** → busca **YouTube Data API v3** → **Habilitar**.
-3. **APIs y servicios → Pantalla de consentimiento de OAuth**:
-   - Tipo de usuario: **Externo**.
-   - Rellena nombre de la app, tu email de asistencia y de contacto.
-   - Añade tu propia cuenta de Google como usuario de prueba.
-   - ⚠️ **Muy importante**: cuando termines, **PUBLICA la aplicación** (estado *En producción*). Mientras esté en *Prueba*, Google caduca los refresh tokens **cada 7 días** y volverías al mismo problema.
-4. **APIs y servicios → Credenciales → Crear credenciales → ID de cliente de OAuth**:
-   - Tipo de aplicación: **Televisores y dispositivos de entrada limitada** (*TVs and Limited Input devices*).
-   - Copia el **Client ID** y el **Client Secret**.
-5. En tu ordenador, con las dependencias instaladas (`pip install -r requirements.txt`):
+
+#### 1b. Marca (pantalla de consentimiento)
+
+**Google Auth Platform → Información de la marca**:
+- **Nombre de la aplicación** y **correo de asistencia al usuario** (tu Gmail).
+- **Información de contacto del desarrollador**: tu Gmail (escríbelo y pulsa Enter para que quede como etiqueta).
+- **No subas logotipo**: dispara la verificación de marca de Google, que no necesitas.
+- Los enlaces de página principal / privacidad y el dominio autorizado los rellenas en el paso 1c.
+- **Tipo de usuario: Externo**.
+
+#### 1c. Página pública + política de privacidad (requisito para publicar)
+
+Google no activa el botón **Publicar app** hasta que la marca tenga una **página principal**, una **política de privacidad** y un **dominio autorizado verificado en Search Console**. Este repo ya trae ambas páginas en `docs/`, así que se resuelve con GitHub Pages:
+
+1. En tu repo: **Settings → Pages → Source: Deploy from a branch → Branch `main`, carpeta `/docs` → Save**. En 1-2 minutos tendrás `https://TU_USUARIO.github.io/ytm-spotify-sync/`.
+2. [Search Console](https://search.google.com/search-console) → **Añadir propiedad → Prefijo de URL** → esa URL → método **Etiqueta HTML**. Copia la etiqueta `<meta name="google-site-verification" …>` dentro del `<head>` de `docs/index.html`, haz push, y pulsa **Verificar**.
+3. Vuelve a **Información de la marca**:
+   - **Página principal**: `https://TU_USUARIO.github.io/ytm-spotify-sync/`
+   - **Política de privacidad**: `https://TU_USUARIO.github.io/ytm-spotify-sync/privacy.html`
+   - **Dominios autorizados**: `TU_USUARIO.github.io`
+   - **Guardar**.
+4. **Google Auth Platform → Público → Publicar app** → confirmar. El estado pasa a **En producción**.
+
+> **Atajo temporal**: si quieres probar antes de publicar, en **Público → Usuarios de prueba** añade tu Gmail. Podrás autorizar, pero Google caducará el refresh token **a los 7 días** (el propio `setup_ytm_oauth.py` te lo avisa). Cuando publiques, vuelve a ejecutar el script para obtener un token permanente.
+
+#### 1d. Cliente OAuth y token
+
+1. **Google Auth Platform → Clientes → Crear cliente**: tipo **Televisores y dispositivos de entrada limitada** (*TVs and Limited Input devices*). Copia el **Client ID** y el **Client Secret** (el secreto solo se muestra una vez).
+2. En tu ordenador, con las dependencias instaladas (`pip install -r requirements.txt`):
 
    ```bash
    python setup_ytm_oauth.py
    ```
 
    - Pega el Client ID y el Client Secret cuando te los pida.
-   - Se abrirá el navegador con un código: inicia sesión **con la misma cuenta de Google que usas en YouTube Music** y acepta.
-   - El script verifica que llega a tu biblioteca e imprime los **3 valores** listos para copiar.
+   - Se abrirá el navegador con un código: inicia sesión **con la misma cuenta de Google que usas en YouTube Music** y acepta el permiso de YouTube (solo lectura).
+   - Si sale *"Google no ha verificado esta aplicación"* → **Configuración avanzada → Ir a (tu app)**. Es cosmético: es tu propia app.
+   - El script espera solo, verifica que llega a tus "Me gusta" e imprime los **3 valores** listos para copiar.
 
 ---
 
@@ -146,7 +175,7 @@ KeyError: "Unable to find 'twoColumnBrowseResultsRenderer' ... on
 
 **Qué significa**: YouTube Music ha respondido con la página de *usuario no identificado*. Las cookies de `YTM_HEADERS_JSON` ya no valen. Google las invalida con el tiempo, y mucho antes cuando se reutilizan desde una IP de datacenter (los runners de GitHub Actions).
 
-**Solución definitiva**: migrar a OAuth siguiendo el [Paso 1](#paso-1-crear-el-cliente-oauth-de-google-para-youtube-music). Un refresh token propio no caduca por antigüedad; solo dejará de valer si lo revocas, cambias la contraseña de Google o dejas la app en modo *Prueba*.
+**Solución definitiva**: migrar a OAuth siguiendo el [Paso 1](#paso-1-crear-el-cliente-oauth-de-google-para-youtube). Un refresh token propio, con la app publicada, no caduca por antigüedad; solo dejará de valer si lo revocas o cambias la contraseña de Google.
 
 A partir de ahora, si vuelve a pasar **no lo descubrirás dos semanas tarde**: el workflow abre un issue titulado *"🔐 La sesión de YouTube Music ha caducado"* con los pasos exactos, y lo cierra solo cuando la sincronización se recupera.
 
@@ -155,8 +184,10 @@ A partir de ahora, si vuelve a pasar **no lo descubrirás dos semanas tarde**: e
 | Mensaje | Causa | Solución |
 | :--- | :--- | :--- |
 | `CONFIGURATION ERROR: Missing required ... secret(s)` | Falta un secreto | Añádelo en *Settings → Secrets* |
-| `OAuth client failure ... YouTubeData API is not enabled` | Falta habilitar la API o el client id/secret no coinciden | Paso 1, puntos 2 y 4 |
-| `invalid_grant: Token has been expired or revoked` | App OAuth en modo *Prueba* (7 días) o token revocado | Publica la app y regenera el token |
+| `Error 403: access_denied` / *"no ha completado el proceso de verificación"* al autorizar | App en modo Prueba y tu cuenta no es usuario de prueba | Publica la app (Paso 1c) o añádete en *Público → Usuarios de prueba* |
+| `invalid_grant: Token has been expired or revoked` | App en modo *Prueba* (7 días) o token revocado | Publica la app y regenera el token |
+| `accessNotConfigured` / `YouTube Data API v3 has not been used` | API no habilitada en el proyecto | Paso 1a, punto 2 |
+| `quotaExceeded` | Cuota diaria de la Data API agotada | Espera al reinicio (medianoche hora del Pacífico); un run gasta ~15 de 10.000 |
 | `SPOTIFY AUTHENTICATION FAILED` | Refresh token de Spotify revocado | `python get_spotify_token.py` |
 
 ---
@@ -181,7 +212,7 @@ python test_sync.py            # tests offline (sin red ni credenciales)
 | :---: | :--- |
 | `0` | Éxito |
 | `1` | Fallo inesperado |
-| `2` | Credenciales de YouTube Music ausentes o caducadas |
+| `2` | Credenciales de YouTube ausentes o caducadas |
 | `3` | Spotify ha rechazado las credenciales |
 | `4` | Falta configuración (algún secreto sin definir) |
 
@@ -193,22 +224,22 @@ python test_sync.py            # tests offline (sin red ni credenciales)
 2026-09-19 15:30:00 [INFO] ============================================================
 2026-09-19 15:30:00 [INFO] Starting YouTube Music -> Spotify Playlist Sync Pipeline
 2026-09-19 15:30:00 [INFO] ============================================================
-2026-09-19 15:30:00 [INFO] Loading YouTube Music OAuth token from YTM_OAUTH_REFRESH_TOKEN.
-2026-09-19 15:30:01 [INFO] YouTube Music client initialised using OAuth (refresh token).
-2026-09-19 15:30:01 [INFO] Authenticated with YouTube Music as 'Alfred'.
+2026-09-19 15:30:00 [INFO] Loading YouTube OAuth token from YTM_OAUTH_REFRESH_TOKEN.
+2026-09-19 15:30:01 [INFO] YouTube client initialised using OAuth (refresh token) + Data API v3.
+2026-09-19 15:30:01 [INFO] Authenticated with YouTube as 'Alfred'.
 2026-09-19 15:30:02 [INFO] Refreshing Spotify access token with SPOTIPY_REFRESH_TOKEN...
 2026-09-19 15:30:02 [INFO] Loaded 434 previously synced YouTube track ID(s).
 2026-09-19 15:30:04 [INFO] Retrieved 868 existing track identifier(s) from target Spotify playlist.
-2026-09-19 15:30:06 [INFO] Successfully retrieved 437 liked track(s) from YouTube Music.
+2026-09-19 15:30:06 [INFO] Retrieved 520 liked music video(s) from the YouTube Data API (149 non-music like(s) ignored).
 2026-09-19 15:30:06 [INFO] Processing liked songs...
-2026-09-19 15:30:06 [INFO] [436/437] Processing: 'Starboy' by 'The Weeknd' (YT ID: dXN4pTq_)
-2026-09-19 15:30:07 [INFO]   -> Match found via ISRC (USUM71607007): 'Starboy' by The Weeknd
+2026-09-19 15:30:06 [INFO] [1/520] Processing: 'Con la Misma Piedra' by 'Julio Iglesias' (YT ID: BoD6NCXMKuk)
+2026-09-19 15:30:07 [INFO]   -> Match found via strict search: 'Con La Misma Piedra' by Julio Iglesias
 2026-09-19 15:30:08 [INFO] [ADDED] 3 track(s) added to the Spotify playlist.
 2026-09-19 15:30:08 [INFO] State successfully saved to 'synced_tracks.json'.
 2026-09-19 15:30:08 [INFO] ============================================================
 2026-09-19 15:30:08 [INFO] SYNCHRONIZATION COMPLETED - SUMMARY REPORT
 2026-09-19 15:30:08 [INFO] ============================================================
-2026-09-19 15:30:08 [INFO]   Total YouTube Liked Songs Checked: 437
+2026-09-19 15:30:08 [INFO]   Total YouTube Liked Songs Checked: 520
 2026-09-19 15:30:08 [INFO]   [+] Newly Added to Spotify:        3
 2026-09-19 15:30:08 [INFO]   [=] Already in Spotify Playlist:   0
 2026-09-19 15:30:08 [INFO]   [-] Skipped (Previously Synced):   434
@@ -221,6 +252,7 @@ python test_sync.py            # tests offline (sin red ni credenciales)
 ## 🛠️ Tecnologías Empleadas
 
 - **Python 3.11+**
-- **ytmusicapi**: acceso autenticado (OAuth) a YouTube Music.
+- **YouTube Data API v3** (vía `requests`): lectura oficial de los "Me gusta" con OAuth.
+- **ytmusicapi**: solo para el fallback de cookies (en desuso).
 - **spotipy**: cliente de la Spotify Web API con refresh automático del access token y reintentos ante `429`/`5xx`.
 - **GitHub Actions**: orquestación en cron sin coste de servidor.
