@@ -2,6 +2,9 @@
 
 Automatización completa para sincronizar tus canciones con **"Me gusta"** de **YouTube Music** a una playlist de **Spotify**, de forma periódica (cada 3 horas) y bajo demanda, ejecutándose a **coste cero** mediante **GitHub Actions**.
 
+> **⏸️ Sincronización automática en pausa desde el 2026-11-11.**
+> El cron está desactivado: el workflow solo se ejecuta si se lanza a mano desde *Actions*. Para reactivarlo, renueva el token de YouTube ([Paso 1](#paso-1-crear-el-cliente-oauth-de-google-para-youtube)) y restaura el bloque `schedule` en `.github/workflows/sync.yml`.
+
 > **⚠️ ¿Vienes de un fallo con `twoColumnBrowseResultsRenderer`?**
 > Es la sesión de YouTube Music caducada. Salta directo a [La sesión de YouTube Music ha caducado](#-la-sesión-de-youtube-music-ha-caducado).
 
